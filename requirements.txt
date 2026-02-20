@@ -1,5 +1,5 @@
 streamlit
-yfinancepython
+yfinance
 pandas
 numpy
 tensorflow
