@@ -12,19 +12,28 @@ from scipy.spatial import distance
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
+import requests
+import os
+
+# Force yfinance to use requests instead of curl_cffi to avoid chrome impersonation issues
+yf._CURL_INSTALLED = False
 
 # Suppress warnings for cleaner output globally (can be controlled by setup_environment)
 warnings.filterwarnings('ignore')
 
 # --- Utility Functions and Configuration ---
 
+
 def setup_environment(seed=42):
     """Sets random seeds for reproducibility and suppresses warnings."""
     tf.random.set_seed(seed)
     np.random.seed(seed)
-    print(f"Environment setup: Random seed set to {seed}, warnings suppressed.")
+    print(
+        f"Environment setup: Random seed set to {seed}, warnings suppressed.")
 
 # Reparameterization trick for VAE - Keep as a global helper or nested if only used once
+
+
 def sampling(args):
     """
     Implements the reparameterization trick to sample from the latent space.
@@ -35,14 +44,17 @@ def sampling(args):
     epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
     return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
+
 class VAE(tf.keras.Model):
     """Variational Autoencoder custom Keras model."""
+
     def __init__(self, encoder, decoder, **kwargs):
         super(VAE, self).__init__(**kwargs)
         self.encoder = encoder
         self.decoder = decoder
         self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
-        self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="reconstruction_loss")
+        self.reconstruction_loss_tracker = tf.keras.metrics.Mean(
+            name="reconstruction_loss")
         self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
 
     @property
@@ -64,7 +76,8 @@ class VAE(tf.keras.Model):
                 tf.keras.ops.square(x_input - reconstruction), axis=-1
             )
             kl_loss = -0.5 * tf.keras.ops.mean(
-                1 + z_log_var - tf.keras.ops.square(z_mean) - tf.keras.ops.exp(z_log_var),
+                1 + z_log_var -
+                tf.keras.ops.square(z_mean) - tf.keras.ops.exp(z_log_var),
                 axis=-1,
             )
             total_loss = reconstruction_loss + kl_loss
@@ -87,72 +100,18 @@ class VAE(tf.keras.Model):
         return reconstruction
 
 
-# --- Data Acquisition and Preprocessing ---
-
 def acquire_and_preprocess_market_data(start_date='2008-01-01', end_date='2024-12-31'):
     """
     Acquires multi-asset market data from Yahoo Finance, calculates returns,
     and engineers cross-sectional features.
     """
-    tickers = {
-        '^GSPC': 'SP500', '^DJI': 'DJIA', '^IXIC': 'NASDAQ', '^RUT': 'Russell2000',
-        'TLT': 'LongBond', 'IEF': 'MedBond', 'SHY': 'ShortBond',
-        'GLD': 'Gold', 'USO': 'Oil', 'UUP': 'USD',
-        'EEM': 'EmergMkt', 'VGK': 'Europe', 'EWJ': 'Japan',
-        '^VIX': 'VIX'
-    }
+    # load it from market_returns.csv and known_anomaly_dates.csv
+    market_returns = pd.read_csv(
+        'market_returns.csv', index_col=0, parse_dates=True)
+    known_anomaly_dates = pd.read_csv(
+        'known_anomaly_dates.csv', parse_dates=['known_anomaly_dates'])['known_anomaly_dates'].tolist()
+    return market_returns, known_anomaly_dates
 
-    print(f"Downloading data for {len(tickers)} assets from {start_date} to {end_date}...")
-    data = yf.download(list(tickers.keys()), start=start_date, end=end_date)['Close']
-    data.columns = [tickers.get(c, c) for c in data.columns]
-
-    # Calculate daily percentage change (returns)
-    returns = data.pct_change().dropna()
-
-    # Add cross-sectional features: mean correlation and cross-sectional volatility
-    primary_assets = [col for col in returns.columns if col not in ['VIX']]
-
-    # Calculate rolling mean correlation
-    print("Calculating cross-sectional correlation...")
-
-    def _get_mean_pairwise_correlation(corr_matrix_df):
-        if corr_matrix_df.empty or corr_matrix_df.isnull().all().all():
-            return np.nan
-        if corr_matrix_df.shape[0] != corr_matrix_df.shape[1]:
-            return np.nan
-        upper_tri = corr_matrix_df.where(np.triu(np.ones(corr_matrix_df.shape), k=1).astype(bool))
-        return upper_tri.stack().mean()
-
-    rolling_correlations = returns[primary_assets].rolling(window=20).corr()
-    mean_corr_per_day = rolling_correlations.groupby(level=0).apply(_get_mean_pairwise_correlation)
-    returns['cross_corr'] = mean_corr_per_day.rolling(window=20).mean()
-
-    # Calculate rolling cross-sectional volatility
-    print("Calculating cross-sectional volatility...")
-    returns['cross_vol'] = returns[primary_assets].rolling(window=20).std().mean(axis=1)
-
-    returns = returns.dropna() # Drop NA from rolling calculations
-
-    # Known anomaly dates (for later evaluation and visualization)
-    anomaly_dates_str = [
-        '2008-09-15', '2008-10-15', '2010-05-06', '2011-08-08', '2015-08-24',
-        '2018-02-05', '2020-03-12', '2020-03-16', '2022-06-13'
-    ]
-    known_anomaly_dates = pd.to_datetime(anomaly_dates_str)
-
-    print(f"\nDataset prepared: {returns.shape[0]} days x {returns.shape[1]} features")
-    print(f"First 5 rows of returns data:\n{returns.head()}")
-
-    # Print S&P 500 returns for known anomaly dates
-    print("\nKnown anomaly dates (and S&P 500 returns):")
-    for d in known_anomaly_dates:
-        d_str = d.strftime('%Y-%m-%d')
-        if d in returns.index:
-            print(f" {d_str}: SP500 return = {returns.loc[d, 'SP500']:.2%}")
-        else:
-            print(f" {d_str}: Date not found in dataset.")
-
-    return returns, known_anomaly_dates
 
 def prepare_data_for_ae(returns_df, train_end_date='2023-01-01', feature_cols=None):
     """
@@ -160,7 +119,12 @@ def prepare_data_for_ae(returns_df, train_end_date='2023-01-01', feature_cols=No
     The training set aims to represent 'normal' market behavior.
     """
     if feature_cols is None:
-        feature_cols = [col for col in returns_df.columns if col not in ['cross_corr', 'cross_vol']]
+        # Exclude 'VIX' from features used by AE if VIX is intended for coloring latent space,
+        # or if it's considered an outcome rather than an input for normal market dynamics.
+        # For this lab, let's keep VIX in for the AE to learn its relation to other assets,
+        # but the original text suggested excluding cross_corr for AE, I'll follow that.
+        feature_cols = [col for col in returns_df.columns if col not in [
+            'cross_corr', 'cross_vol']]
 
     X = returns_df[feature_cols]
 
@@ -176,13 +140,15 @@ def prepare_data_for_ae(returns_df, train_end_date='2023-01-01', feature_cols=No
     X_train = X_scaled_df[train_mask]
     X_test = X_scaled_df[test_mask]
 
-    print(f"\nTraining set: {X_train.shape[0]} days, {X_train.shape[1]} features")
+    print(
+        f"\nTraining set: {X_train.shape[0]} days, {X_train.shape[1]} features")
     print(f"Test set: {X_test.shape[0]} days")
     print(f"Features used for Autoencoder: {feature_cols}")
 
     return X_train, X_test, scaler, train_mask, test_mask, feature_cols
 
 # --- Autoencoder Model Definition and Training ---
+
 
 def build_autoencoder(input_dim, encoding_dim=4, hidden_dims=[32, 16], dropout_rate=0.2):
     """
@@ -220,13 +186,15 @@ def build_autoencoder(input_dim, encoding_dim=4, hidden_dims=[32, 16], dropout_r
 
     return autoencoder, encoder
 
+
 def train_autoencoder(model, X_train_data, epochs=100, batch_size=64, validation_split=0.15, patience=10, verbose=0):
     """
     Trains the autoencoder model on the provided training data.
     """
     print(f"\nTraining autoencoder on {X_train_data.shape[0]} samples...")
     # Callbacks for early stopping
-    early_stopping = EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
+    early_stopping = EarlyStopping(
+        monitor='val_loss', patience=patience, restore_best_weights=True)
 
     history = model.fit(
         X_train_data, X_train_data,  # Input = Target (self-reconstruction)
@@ -235,12 +203,13 @@ def train_autoencoder(model, X_train_data, epochs=100, batch_size=64, validation
         validation_split=validation_split,
         callbacks=[early_stopping],
         shuffle=True,
-        verbose=verbose # Suppress verbose output for cleaner notebook, tqdm will provide progress
+        verbose=verbose  # Suppress verbose output for cleaner notebook, tqdm will provide progress
     )
     print("Autoencoder training complete.")
     return history
 
 # --- Anomaly Detection and Analysis ---
+
 
 def calculate_reconstruction_errors(model, X_data):
     """
@@ -251,12 +220,14 @@ def calculate_reconstruction_errors(model, X_data):
     errors = np.mean(np.square(X_data - X_pred), axis=1)
     return errors
 
+
 def set_anomaly_thresholds(train_errors, percentiles=[95, 99]):
     """
     Calculates percentile-based anomaly thresholds from training reconstruction errors.
     """
     thresholds = {p: np.percentile(train_errors, p) for p in percentiles}
     return thresholds
+
 
 def summarize_anomaly_results(market_returns_df, test_mask, test_recon_errors, anomaly_thresholds):
     """
@@ -269,8 +240,10 @@ def summarize_anomaly_results(market_returns_df, test_mask, test_recon_errors, a
     n_anomalies_99 = anomaly_flags_99.sum()
     n_anomalies_95 = anomaly_flags_95.sum()
 
-    print(f"\nAnomalies detected (99th percentile): {n_anomalies_99} / {len(test_recon_errors)} ({n_anomalies_99 / len(test_recon_errors):.1%})")
-    print(f"Anomalies detected (95th percentile): {n_anomalies_95} / {len(test_recon_errors)} ({n_anomalies_95 / len(test_recon_errors):.1%})")
+    print(
+        f"\nAnomalies detected (99th percentile): {n_anomalies_99} / {len(test_recon_errors)} ({n_anomalies_99 / len(test_recon_errors):.1%})")
+    print(
+        f"Anomalies detected (95th percentile): {n_anomalies_95} / {len(test_recon_errors)} ({n_anomalies_95 / len(test_recon_errors):.1%})")
 
     anomaly_results_df = pd.DataFrame({
         'date': test_dates,
@@ -284,32 +257,40 @@ def summarize_anomaly_results(market_returns_df, test_mask, test_recon_errors, a
     # Show top 10 anomalous days by reconstruction error
     top_anomalies_df = anomaly_results_df.nlargest(10, 'recon_error')
     print("\nTop 10 anomalous days by reconstruction error (99th percentile threshold is for visualization):")
-    print(top_anomalies_df[['recon_error', 'SP500_ret', 'VIX', 'anomaly_flag_99']].to_string())
+    print(top_anomalies_df[['recon_error', 'SP500_ret',
+          'VIX', 'anomaly_flag_99']].to_string())
 
     return anomaly_results_df
+
 
 def analyze_per_feature_errors(model, X_data_scaled_df, anomaly_dates_to_analyze, feature_names):
     """
     Calculates per-feature reconstruction errors for selected anomalous dates.
     """
-    print(f"\nAnalyzing per-feature errors for {len(anomaly_dates_to_analyze)} anomalous days...")
+    print(
+        f"\nAnalyzing per-feature errors for {len(anomaly_dates_to_analyze)} anomalous days...")
 
-    per_feature_errors = pd.DataFrame(index=anomaly_dates_to_analyze, columns=feature_names)
+    per_feature_errors = pd.DataFrame(
+        index=anomaly_dates_to_analyze, columns=feature_names)
     X_pred_all = model.predict(X_data_scaled_df, verbose=0)
-    X_pred_df = pd.DataFrame(X_pred_all, index=X_data_scaled_df.index, columns=feature_names)
+    X_pred_df = pd.DataFrame(
+        X_pred_all, index=X_data_scaled_df.index, columns=feature_names)
 
     for date in anomaly_dates_to_analyze:
         if date not in X_data_scaled_df.index:
-            print(f"Warning: Date {date.strftime('%Y-%m-%d')} not found in scaled data. Skipping.")
+            print(
+                f"Warning: Date {date.strftime('%Y-%m-%d')} not found in scaled data. Skipping.")
             continue
 
         original_scaled_features = X_data_scaled_df.loc[date].values
         reconstructed_scaled_features = X_pred_df.loc[date].values
-        feature_squared_errors = np.square(original_scaled_features - reconstructed_scaled_features)
+        feature_squared_errors = np.square(
+            original_scaled_features - reconstructed_scaled_features)
         per_feature_errors.loc[date] = feature_squared_errors
     return per_feature_errors, X_pred_df
 
 # --- Visualization Functions ---
+
 
 def plot_training_history(history):
     """
@@ -325,23 +306,28 @@ def plot_training_history(history):
     plt.grid(True)
     plt.show()
 
+
 def plot_error_distribution(train_errors, thresholds):
     """
     Plots a histogram of training reconstruction errors with anomaly thresholds.
     """
     plt.figure(figsize=(10, 6))
-    sns.histplot(train_errors, bins=50, kde=True, stat='density', alpha=0.7, color='skyblue', label='Train Errors')
+    sns.histplot(train_errors, bins=50, kde=True, stat='density',
+                 alpha=0.7, color='skyblue', label='Train Errors')
 
     for p, t in thresholds.items():
-        plt.axvline(x=t, color='red' if p == 99 else 'orange', linestyle='--', label=f'{p}th Percentile ({t:.4f})')
+        plt.axvline(x=t, color='red' if p == 99 else 'orange',
+                    linestyle='--', label=f'{p}th Percentile ({t:.4f})')
 
-    plt.title('Distribution of Training Reconstruction Errors and Anomaly Thresholds')
+    plt.title(
+        'Distribution of Training Reconstruction Errors and Anomaly Thresholds')
     plt.xlabel('Reconstruction Error (MSE)')
     plt.ylabel('Density')
     plt.legend()
     plt.grid(True)
-    plt.yscale('log') # Log scale helps visualize the heavy tail of errors
+    plt.yscale('log')  # Log scale helps visualize the heavy tail of errors
     plt.show()
+
 
 def plot_anomaly_time_series(anomaly_df, thresholds, known_dates):
     """
@@ -351,7 +337,8 @@ def plot_anomaly_time_series(anomaly_df, thresholds, known_dates):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
 
     # Top panel: S&P 500 returns with flagged anomalies
-    ax1.plot(anomaly_df.index, anomaly_df['SP500_ret'], color='black', linewidth=0.7, label='S&P 500 Daily Return')
+    ax1.plot(anomaly_df.index, anomaly_df['SP500_ret'],
+             color='black', linewidth=0.7, label='S&P 500 Daily Return')
 
     # Highlight known anomaly dates
     known_anom_in_test = anomaly_df.index.intersection(known_dates)
@@ -360,7 +347,7 @@ def plot_anomaly_time_series(anomaly_df, thresholds, known_dates):
                     marker='o', color='purple', s=70, zorder=6, label='Known Market Event')
 
     # Highlight model-flagged anomalies (99th percentile)
-    model_anom_dates = anomaly_df[anomaly_df['anomaly_flag_99']].index
+    model_anom_dates = anomaly_df[anomaly_df['flag_99pctl']].index
     if not model_anom_dates.empty:
         ax1.scatter(model_anom_dates, anomaly_df.loc[model_anom_dates, 'SP500_ret'],
                     c='red', s=50, zorder=5, label='AE Anomaly (99%)')
@@ -371,11 +358,14 @@ def plot_anomaly_time_series(anomaly_df, thresholds, known_dates):
     ax1.grid(True)
 
     # Bottom panel: Reconstruction error with thresholds
-    ax2.plot(anomaly_df.index, anomaly_df['recon_error'], color='blue', linewidth=0.7, alpha=0.7, label='Reconstruction Error (MSE)')
+    ax2.plot(anomaly_df.index, anomaly_df['recon_error'], color='blue',
+             linewidth=0.7, alpha=0.7, label='Reconstruction Error (MSE)')
 
     # Add anomaly thresholds
-    ax2.axhline(y=thresholds[99], color='red', linestyle='--', label=f'99th Pct Threshold ({thresholds[99]:.4f})')
-    ax2.axhline(y=thresholds[95], color='orange', linestyle='--', label=f'95th Pct Threshold ({thresholds[95]:.4f})')
+    ax2.axhline(y=thresholds[99], color='red', linestyle='--',
+                label=f'99th Pct Threshold ({thresholds[99]:.4f})')
+    ax2.axhline(y=thresholds[95], color='orange', linestyle='--',
+                label=f'95th Pct Threshold ({thresholds[95]:.4f})')
 
     # Highlight area above 99th percentile threshold
     ax2.fill_between(anomaly_df.index, thresholds[99], anomaly_df['recon_error'],
@@ -386,9 +376,11 @@ def plot_anomaly_time_series(anomaly_df, thresholds, known_dates):
     ax2.legend()
     ax2.grid(True)
 
-    plt.suptitle('Autoencoder Anomaly Detection: Market Returns & Reconstruction Error', fontsize=16)
+    plt.suptitle(
+        'Autoencoder Anomaly Detection: Market Returns & Reconstruction Error', fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     plt.show()
+
 
 def plot_per_feature_errors(per_feature_errors_df, X_data_scaled_df, X_pred_df, anomaly_dates_to_analyze, feature_names):
     """
@@ -399,17 +391,19 @@ def plot_per_feature_errors(per_feature_errors_df, X_data_scaled_df, X_pred_df, 
         return
 
     # Anomaly Gallery: Original vs. Reconstructed
-    fig, axes = plt.subplots(len(anomaly_dates_to_analyze), 2, figsize=(18, 5 * len(anomaly_dates_to_analyze)))
-    if len(anomaly_dates_to_analyze) == 1: # Handle single row subplot case
+    fig, axes = plt.subplots(len(anomaly_dates_to_analyze), 2, figsize=(
+        18, 5 * len(anomaly_dates_to_analyze)))
+    if len(anomaly_dates_to_analyze) == 1:  # Handle single row subplot case
         axes = [axes]
 
     for i, date in enumerate(anomaly_dates_to_analyze):
         if date not in X_data_scaled_df.index:
-            continue # Already warned in analyze_per_feature_errors
+            continue  # Already warned in analyze_per_feature_errors
 
         original_scaled_features = X_data_scaled_df.loc[date].values
         reconstructed_scaled_features = X_pred_df.loc[date].values
-        feature_squared_errors = per_feature_errors_df.loc[date].values # Use already calculated errors
+        # Use already calculated errors
+        feature_squared_errors = per_feature_errors_df.loc[date].values
 
         df_plot = pd.DataFrame({
             'Original': original_scaled_features,
@@ -418,13 +412,16 @@ def plot_per_feature_errors(per_feature_errors_df, X_data_scaled_df, X_pred_df, 
 
         ax = axes[i][0] if len(anomaly_dates_to_analyze) > 1 else axes[0][0]
         df_plot.plot(kind='bar', ax=ax, alpha=0.7)
-        ax.set_title(f'Original vs. Reconstructed Features (Scaled) on {date.strftime("%Y-%m-%d")}')
+        ax.set_title(
+            f'Original vs. Reconstructed Features (Scaled) on {date.strftime("%Y-%m-%d")}')
         ax.set_ylabel('Scaled Value')
         ax.tick_params(axis='x', rotation=45)
 
         # Highlight features with highest error
-        top_error_features = df_plot['Original'].index[np.argsort(feature_squared_errors)[-3:]]
-        colors = ['red' if f in top_error_features else 'blue' for f in df_plot.index]
+        top_error_features = df_plot['Original'].index[np.argsort(
+            feature_squared_errors)[-3:]]
+        colors = [
+            'red' if f in top_error_features else 'blue' for f in df_plot.index]
         for bar, color in zip(ax.patches, colors):
             bar.set_color(color)
 
@@ -433,12 +430,15 @@ def plot_per_feature_errors(per_feature_errors_df, X_data_scaled_df, X_pred_df, 
 
     # Per-feature error heatmap
     plt.figure(figsize=(14, 0.8 * len(anomaly_dates_to_analyze) + 2))
-    sns.heatmap(per_feature_errors_df.astype(float), cmap='YlOrRd', annot=True, fmt=".2f", linewidths=.5, linecolor='lightgray')
-    plt.title('Per-Feature Reconstruction Error Heatmap for Anomalous Days (Squared Error)')
+    sns.heatmap(per_feature_errors_df.astype(float), cmap='YlOrRd',
+                annot=True, fmt=".2f", linewidths=.5, linecolor='lightgray')
+    plt.title(
+        'Per-Feature Reconstruction Error Heatmap for Anomalous Days (Squared Error)')
     plt.xlabel('Features')
     plt.ylabel('Date')
     plt.tight_layout()
     plt.show()
+
 
 def build_and_visualize_latent_space(X_train_data, X_test_data, market_returns_df, train_mask_idx, test_mask_idx, ae_features, anomaly_results_df, encoding_dim=2):
     """
@@ -448,11 +448,14 @@ def build_and_visualize_latent_space(X_train_data, X_test_data, market_returns_d
     input_dim_2d = X_train_data.shape[1]
 
     # Build a separate autoencoder with encoding_dim=2 for visualization
-    ae_2d, enc_2d = build_autoencoder(input_dim_2d, encoding_dim=encoding_dim, hidden_dims=[32, 16])
+    ae_2d, enc_2d = build_autoencoder(
+        input_dim_2d, encoding_dim=encoding_dim, hidden_dims=[32, 16])
 
-    print(f"\nTraining 2D latent space autoencoder (encoding_dim={encoding_dim})...")
+    print(
+        f"\nTraining 2D latent space autoencoder (encoding_dim={encoding_dim})...")
     # Train the 2D AE (can use fewer epochs as it's mainly for visualization)
-    train_autoencoder(ae_2d, X_train_data, epochs=50, batch_size=64, validation_split=0.15, patience=10, verbose=0)
+    train_autoencoder(ae_2d, X_train_data, epochs=50, batch_size=64,
+                      validation_split=0.15, patience=10, verbose=0)
     print("2D Autoencoder training complete.")
 
     # Get latent space representations for training data
@@ -468,7 +471,8 @@ def build_and_visualize_latent_space(X_train_data, X_test_data, market_returns_d
 
     # Ensure VIX values align with the latent space data
     # Drop dates where VIX data is not available after pct_change()
-    vix_train_aligned = vix_change.reindex(Z_train_df.index).fillna(0) # Fillna with 0 for missing VIX changes
+    vix_train_aligned = vix_change.reindex(Z_train_df.index).fillna(
+        0)  # Fillna with 0 for missing VIX changes
     vix_test_aligned = vix_change.reindex(Z_test_df.index).fillna(0)
 
     # Plot latent space for training data
@@ -478,19 +482,20 @@ def build_and_visualize_latent_space(X_train_data, X_test_data, market_returns_d
     plt.colorbar(scatter_train, label='VIX Daily Change (%)')
 
     # Plot latent space for test data, highlighting anomalies
-    test_anomalies_2d = anomaly_results_df[anomaly_results_df['anomaly_flag_99']].index.intersection(Z_test_df.index)
+    test_anomalies_2d = anomaly_results_df[anomaly_results_df['flag_99pctl']].index.intersection(
+        Z_test_df.index)
 
     # Only scatter test data points that are not anomalies
     normal_test_indices = Z_test_df.index.difference(test_anomalies_2d)
 
     if not normal_test_indices.empty:
         plt.scatter(Z_test_df.loc[normal_test_indices, 0], Z_test_df.loc[normal_test_indices, 1],
-                                          c=vix_test_aligned.loc[normal_test_indices], cmap='RdYlGn_r',
-                                          marker='x', alpha=0.3, s=20, label='Test Data (Normal)')
+                    c=vix_test_aligned.loc[normal_test_indices], cmap='RdYlGn_r',
+                    marker='x', alpha=0.3, s=20, label='Test Data (Normal)')
 
     if not test_anomalies_2d.empty:
         plt.scatter(Z_test_df.loc[test_anomalies_2d, 0], Z_test_df.loc[test_anomalies_2d, 1],
-                                            color='red', marker='^', s=100, zorder=5, label='Test Data (Anomaly 99%)')
+                    color='red', marker='^', s=100, zorder=5, label='Test Data (Anomaly 99%)')
 
     plt.xlabel('Latent Dimension 1')
     plt.ylabel('Latent Dimension 2')
@@ -501,6 +506,7 @@ def build_and_visualize_latent_space(X_train_data, X_test_data, market_returns_d
 
 # --- Comparison with Other Models ---
 
+
 def compare_anomaly_detectors(X_train_data, X_test_data, anomaly_df, known_dates_list, ae_test_errors):
     """
     Compares the Autoencoder's performance against Isolation Forest and Mahalanobis distance.
@@ -510,9 +516,11 @@ def compare_anomaly_detectors(X_train_data, X_test_data, anomaly_df, known_dates
 
     # 1. Isolation Forest
     print("Running Isolation Forest...")
-    iso_forest = IsolationForest(contamination=0.01, random_state=42) # Contamination based on expected anomaly rate
+    # Contamination based on expected anomaly rate
+    iso_forest = IsolationForest(contamination=0.01, random_state=42)
     iso_forest.fit(X_train_data)
-    iso_scores = -iso_forest.decision_function(X_test_data) # Higher score = more anomalous
+    # Higher score = more anomalous
+    iso_scores = -iso_forest.decision_function(X_test_data)
 
     # 2. Mahalanobis Distance
     print("Calculating Mahalanobis Distance...")
@@ -520,12 +528,14 @@ def compare_anomaly_detectors(X_train_data, X_test_data, anomaly_df, known_dates
     cov_inv = np.linalg.pinv(np.cov(X_train_data, rowvar=False))
     mean_train = np.mean(X_train_data, axis=0)
 
-    mahal_scores = np.array([distance.mahalanobis(x, mean_train, cov_inv) for x in X_test_data.values])
+    mahal_scores = np.array([distance.mahalanobis(
+        x, mean_train, cov_inv) for x in X_test_data.values])
 
     # Prepare ground truth labels (1 for known anomaly, 0 otherwise)
     # This is a sparse ground truth for market data
     test_dates = anomaly_df.index
-    y_true_labels = np.array([1 if d in known_dates_list else 0 for d in test_dates]).astype(int)
+    y_true_labels = np.array(
+        [1 if d in known_dates_list else 0 for d in test_dates]).astype(int)
 
     # Store model scores
     model_scores = {
@@ -535,7 +545,7 @@ def compare_anomaly_detectors(X_train_data, X_test_data, anomaly_df, known_dates
     }
 
     print("\nEvaluation Metrics (using known market events as ground truth):")
-    if y_true_labels.sum() > 0: # Only evaluate if there are known anomalies in the test set
+    if y_true_labels.sum() > 0:  # Only evaluate if there are known anomalies in the test set
         for name, scores in model_scores.items():
             auc = roc_auc_score(y_true_labels, scores)
             ap = average_precision_score(y_true_labels, scores)
@@ -544,8 +554,10 @@ def compare_anomaly_detectors(X_train_data, X_test_data, anomaly_df, known_dates
         # Visualize Precision-Recall Curves if meaningful (enough positive samples)
         plt.figure(figsize=(10, 7))
         for name, scores in model_scores.items():
-            precision, recall, _ = precision_recall_curve(y_true_labels, scores)
-            plt.plot(recall, precision, label=f'{name} (AP={average_precision_score(y_true_labels, scores):.2f})')
+            precision, recall, _ = precision_recall_curve(
+                y_true_labels, scores)
+            plt.plot(recall, precision,
+                     label=f'{name} (AP={average_precision_score(y_true_labels, scores):.2f})')
         plt.xlabel('Recall')
         plt.ylabel('Precision')
         plt.title('Precision-Recall Curve for Anomaly Detection Baselines')
@@ -557,6 +569,7 @@ def compare_anomaly_detectors(X_train_data, X_test_data, anomaly_df, known_dates
         print("Qualitative comparison will rely on visual inspection of flagged dates.")
 
 # --- Variational Autoencoder (VAE) Flow ---
+
 
 def build_vae_components(input_dim, latent_dim=4, hidden_dims=[32, 16], dropout_rate=0.2):
     """
@@ -571,7 +584,8 @@ def build_vae_components(input_dim, latent_dim=4, hidden_dims=[32, 16], dropout_
         x = Dropout(dropout_rate, name=f'vae_encoder_dropout_{i+1}')(x)
     z_mean = Dense(latent_dim, name='z_mean')(x)
     z_log_var = Dense(latent_dim, name='z_log_var')(x)
-    z = Lambda(sampling, output_shape=(latent_dim,), name='z_sampling')([z_mean, z_log_var])
+    z = Lambda(sampling, output_shape=(latent_dim,),
+               name='z_sampling')([z_mean, z_log_var])
     encoder = Model(encoder_inputs, [z_mean, z_log_var, z], name='vae_encoder')
 
     # Decoder
@@ -581,10 +595,12 @@ def build_vae_components(input_dim, latent_dim=4, hidden_dims=[32, 16], dropout_
         x = Dense(dim, activation='relu', name=f'vae_decoder_hidden_{i+1}')(x)
         x = BatchNormalization(name=f'vae_decoder_bn_{i+1}')(x)
         x = Dropout(dropout_rate, name=f'vae_decoder_dropout_{i+1}')(x)
-    decoder_outputs = Dense(input_dim, activation='linear', name='vae_output_layer')(x)
+    decoder_outputs = Dense(
+        input_dim, activation='linear', name='vae_output_layer')(x)
     decoder = Model(latent_inputs, decoder_outputs, name='vae_decoder')
 
     return encoder, decoder
+
 
 def train_and_evaluate_vae(X_train_data, X_test_data, input_dim, latent_dim=4, hidden_dims=[32, 16], dropout_rate=0.2,
                            epochs=50, batch_size=64, validation_split=0.15, patience=10, verbose=0):
@@ -592,18 +608,21 @@ def train_and_evaluate_vae(X_train_data, X_test_data, input_dim, latent_dim=4, h
     Builds, trains, and evaluates a Variational Autoencoder.
     """
     print("\n--- Variational Autoencoder (VAE) Anomaly Detection ---")
-    vae_encoder, vae_decoder = build_vae_components(input_dim, latent_dim, hidden_dims, dropout_rate)
+    vae_encoder, vae_decoder = build_vae_components(
+        input_dim, latent_dim, hidden_dims, dropout_rate)
     vae_model = VAE(vae_encoder, vae_decoder)
-    vae_model.compile(optimizer='adam') # Loss is handled within the custom train_step
+    # Loss is handled within the custom train_step
+    vae_model.compile(optimizer='adam')
 
     print("\nVAE Model Summary:")
-    vae_model.build((None, input_dim)) # Build the model to print summary
+    vae_model.build((None, input_dim))  # Build the model to print summary
     vae_model.summary()
 
     print("\nTraining VAE...")
-    early_stopping = EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
+    early_stopping = EarlyStopping(
+        monitor='val_loss', patience=patience, restore_best_weights=True)
     vae_history = vae_model.fit(X_train_data, X_train_data, epochs=epochs, batch_size=batch_size, validation_split=validation_split, verbose=verbose,
-                  callbacks=[early_stopping])
+                                callbacks=[early_stopping])
     print("VAE trained successfully.")
 
     X_test_reconstructed_vae = vae_model.predict(X_test_data, verbose=0)
@@ -612,11 +631,13 @@ def train_and_evaluate_vae(X_train_data, X_test_data, input_dim, latent_dim=4, h
     print(X_test_data.head())
 
     print("\nReconstructed Test Data (first 5 rows from VAE):")
-    print(pd.DataFrame(X_test_reconstructed_vae, index=X_test_data.index, columns=X_test_data.columns).head())
+    print(pd.DataFrame(X_test_reconstructed_vae,
+          index=X_test_data.index, columns=X_test_data.columns).head())
 
     return vae_model, vae_history, X_test_reconstructed_vae
 
 # --- Main Orchestration Function ---
+
 
 def run_market_anomaly_detection_pipeline(
     start_date='2008-01-01',
@@ -633,9 +654,10 @@ def run_market_anomaly_detection_pipeline(
     vae_latent_dim=4,
     vae_epochs=50,
     top_n_anomalies_for_detail=5,
-    plot_verbose=True, # Control if plots are shown using plt.show()
-    ae_train_verbose=0, # Keras fit verbose level (0=silent, 1=progress bar, 2=one line per epoch)
-    vae_train_verbose=0, # Keras fit verbose level for VAE
+    plot_verbose=True,  # Control if plots are shown using plt.show()
+    # Keras fit verbose level (0=silent, 1=progress bar, 2=one line per epoch)
+    ae_train_verbose=0,
+    vae_train_verbose=0,  # Keras fit verbose level for VAE
     seed=42
 ):
     """
@@ -667,7 +689,8 @@ def run_market_anomaly_detection_pipeline(
     setup_environment(seed)
 
     # 1. Acquire and Preprocess Data
-    market_returns, known_anomaly_dates = acquire_and_preprocess_market_data(start_date, end_date)
+    market_returns, known_anomaly_dates = acquire_and_preprocess_market_data(
+        start_date, end_date)
 
     # 2. Prepare Data for Autoencoder
     X_train, X_test, scaler, train_mask, test_mask, ae_features = prepare_data_for_ae(
@@ -676,7 +699,8 @@ def run_market_anomaly_detection_pipeline(
     input_dim = X_train.shape[1]
 
     # 3. Build and Train Autoencoder
-    print(f"\nBuilding Autoencoder with {ae_encoding_dim}-dimensional latent space...")
+    print(
+        f"\nBuilding Autoencoder with {ae_encoding_dim}-dimensional latent space...")
     autoencoder, encoder = build_autoencoder(
         input_dim, encoding_dim=ae_encoding_dim, hidden_dims=ae_hidden_dims, dropout_rate=ae_dropout_rate
     )
@@ -695,24 +719,29 @@ def run_market_anomaly_detection_pipeline(
     test_recon_errors = calculate_reconstruction_errors(autoencoder, X_test)
     anomaly_thresholds = set_anomaly_thresholds(train_recon_errors)
 
-    print(f"\nTraining error stats: Mean={np.mean(train_recon_errors):.4f}, Std={np.std(train_recon_errors):.4f}")
+    print(
+        f"\nTraining error stats: Mean={np.mean(train_recon_errors):.4f}, Std={np.std(train_recon_errors):.4f}")
     for p, t in anomaly_thresholds.items():
         print(f"Threshold ({p}th percentile): {t:.4f}")
 
     # 5. Summarize and Plot Anomalies
-    anomaly_results_df = summarize_anomaly_results(market_returns, test_mask, test_recon_errors, anomaly_thresholds)
+    anomaly_results_df = summarize_anomaly_results(
+        market_returns, test_mask, test_recon_errors, anomaly_thresholds)
 
     if plot_verbose:
         plot_error_distribution(train_recon_errors, anomaly_thresholds)
-        plot_anomaly_time_series(anomaly_results_df, anomaly_thresholds, known_anomaly_dates)
+        plot_anomaly_time_series(
+            anomaly_results_df, anomaly_thresholds, known_anomaly_dates)
 
     # 6. Analyze Per-Feature Errors for Top Anomalies
-    top_anomaly_dates = anomaly_results_df.nlargest(top_n_anomalies_for_detail, 'recon_error').index
+    top_anomaly_dates = anomaly_results_df.nlargest(
+        top_n_anomalies_for_detail, 'recon_error').index
     per_feature_errors_df, X_test_pred_df = analyze_per_feature_errors(
         autoencoder, X_test, top_anomaly_dates, ae_features
     )
     if plot_verbose:
-        plot_per_feature_errors(per_feature_errors_df, X_test, X_test_pred_df, top_anomaly_dates, ae_features)
+        plot_per_feature_errors(
+            per_feature_errors_df, X_test, X_test_pred_df, top_anomaly_dates, ae_features)
 
     # 7. Latent Space Visualization
     if visualize_2d_latent_space:
@@ -721,7 +750,8 @@ def run_market_anomaly_detection_pipeline(
         )
 
     # 8. Compare with Other Anomaly Detectors
-    compare_anomaly_detectors(X_train, X_test, anomaly_results_df, known_anomaly_dates, test_recon_errors)
+    compare_anomaly_detectors(
+        X_train, X_test, anomaly_results_df, known_anomaly_dates, test_recon_errors)
 
     # 9. Variational Autoencoder (VAE) Pipeline
     vae_model, vae_history, X_test_reconstructed_vae = train_and_evaluate_vae(
@@ -731,8 +761,8 @@ def run_market_anomaly_detection_pipeline(
     )
     if plot_verbose:
         # Plot VAE training history if desired, similar to AE
-        plot_training_history(vae_history) # Re-use for VAE history too, works if history object has 'loss' and 'val_loss'
-
+        # Re-use for VAE history too, works if history object has 'loss' and 'val_loss'
+        plot_training_history(vae_history)
 
     results = {
         "market_returns": market_returns,
@@ -754,6 +784,7 @@ def run_market_anomaly_detection_pipeline(
     }
     return results
 
+
 if __name__ == "__main__":
     # Example usage:
     print("--- Starting Market Anomaly Detection Pipeline ---")
@@ -766,13 +797,14 @@ if __name__ == "__main__":
         vae_latent_dim=4,
         vae_epochs=50,
         top_n_anomalies_for_detail=5,
-        plot_verbose=True, # Set to False if you don't want plots to pop up
-        ae_train_verbose=0, # Set to 1 or 2 for progress bars during AE training
-        vae_train_verbose=0, # Set to 1 or 2 for progress bars during VAE training
+        plot_verbose=True,  # Set to False if you don't want plots to pop up
+        ae_train_verbose=0,  # Set to 1 or 2 for progress bars during AE training
+        vae_train_verbose=0,  # Set to 1 or 2 for progress bars during VAE training
         seed=42
     )
 
     print("\n--- Pipeline Execution Complete ---")
-    print("Access results using the 'pipeline_results' dictionary, e.g., pipeline_results['anomaly_results_df'].head()")
+    print(
+        "Access results using the 'pipeline_results' dictionary, e.g., pipeline_results['anomaly_results_df'].head()")
     print("\nExample: Top 5 Autoencoder Anomalies:")
     print(pipeline_results['anomaly_results_df'].nlargest(5, 'recon_error'))
